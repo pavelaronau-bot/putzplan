@@ -1,0 +1,32 @@
+[project]
+name = "putzplan-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<0.116", "uvicorn[standard]>=0.32,<0.33",
+  "sqlalchemy[asyncio]>=2.0,<2.1", "asyncpg>=0.30", "alembic>=1.14",
+  "pydantic[email]>=2.9", "pydantic-settings>=2.6", "argon2-cffi>=23.1", "pyjwt>=2.9",
+]
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.7", "mypy>=1.13", "bandit>=1.7"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101", "B008", "UP046"]
+
+[tool.ruff.lint.per-file-ignores]
+# Тесты: пароли-заглушки, компактные утверждения, urllib в smoke-скрипте
+"tests/*" = ["S105", "S106", "S310", "S603", "S607", "E501", "E701", "E702"]
+# Репозитории: SQL собирается только из белого списка колонок, значения — параметры
+"app/repositories/*" = ["S608"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

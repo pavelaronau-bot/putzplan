@@ -1,0 +1,99 @@
+# Один запуск локальной среды: docker compose up --build
+# Порядок: db → migrate (одноразовый шаг) → api → frontend
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: putzplan-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-putzplan_dev}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: Europe/Berlin
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/db/migrations:/docker-entrypoint-initdb.d/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME:-putzplan_dev}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: putzplan-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backend.Dockerfile
+    container_name: putzplan-migrate
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-putzplan_dev}
+      DB_MIGRATION_USER: putzplan_migration
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:-change_me_migration}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "▶ bootstrap: расширения и роли"
+        PGPASSWORD=$$PGPASSWORD psql -h db -U postgres -d $$DB_NAME -v ON_ERROR_STOP=1 \
+          -v mig_pw=$$DB_MIGRATION_PASSWORD \
+          -v run_pw=$${DB_RUNTIME_PASSWORD:-change_me_runtime} \
+          -v aud_pw=$${DB_AUDIT_PASSWORD:-change_me_audit} \
+          -v ro_pw=$${DB_READONLY_PASSWORD:-change_me_readonly} \
+          -f /infrastructure/db/migrations/00_platform_bootstrap.sql
+        PGPASSWORD=$$PGPASSWORD psql -h db -U postgres -d $$DB_NAME \
+          -c "GRANT CREATE ON DATABASE \"$$DB_NAME\" TO putzplan_migration"
+        echo "▶ alembic upgrade head"
+        alembic upgrade head
+        echo "✅ миграции применены"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backend.Dockerfile
+    container_name: putzplan-api
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-putzplan_dev}
+      DB_RUNTIME_PASSWORD: ${DB_RUNTIME_PASSWORD:-change_me_runtime}
+      DB_AUDIT_PASSWORD: ${DB_AUDIT_PASSWORD:-change_me_audit}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,api}
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/frontend.Dockerfile
+    container_name: putzplan-frontend
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["8080:80"]
+
+volumes:
+  pgdata:

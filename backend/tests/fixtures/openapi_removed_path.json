@@ -1,0 +1,79 @@
+{
+ "openapi": "3.1.0",
+ "paths": {
+  "/api/v1/users": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UserOut"
+        }
+       }
+      }
+     },
+     "403": {}
+    }
+   },
+   "post": {
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/UserCreate"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {}
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "UserOut": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "email": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "active",
+       "invited",
+       "terminated"
+      ]
+     }
+    },
+    "required": [
+     "id"
+    ]
+   },
+   "UserCreate": {
+    "type": "object",
+    "properties": {
+     "email": {
+      "type": "string"
+     },
+     "full_name": {
+      "type": "string"
+     },
+     "position": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "email",
+     "full_name"
+    ]
+   }
+  }
+ }
+}

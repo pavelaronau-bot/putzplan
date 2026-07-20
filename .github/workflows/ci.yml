@@ -1,0 +1,277 @@
+name: CI
+
+on:
+  push: { branches: [main, develop] }
+  pull_request:
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  backend-quality:
+    name: Backend · стиль и типы
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff mypy
+      - name: Ruff
+        run: ruff check backend/app backend/tests
+      - name: Mypy (блокирует сборку)
+        run: cd backend && mypy app
+
+  database:
+    name: База · миграции и SQL-тесты
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: postgres }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PUTZPLAN_MIGRATION_PW: ci_migration
+      PUTZPLAN_RUNTIME_PW: ci_runtime
+      PUTZPLAN_AUDIT_PW: ci_audit
+      PUTZPLAN_READONLY_PW: ci_readonly
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: SQL-тесты укрепления базы (падает при любом failed)
+        run: bash infrastructure/db/tests/run_tests.sh putzplan_ci
+      - name: Структурная валидация
+        run: PGPASSWORD=$PUTZPLAN_MIGRATION_PW psql -v ON_ERROR_STOP=1 -h 127.0.0.1
+             -U putzplan_migration -d putzplan_ci -f infrastructure/db/validate.sql
+
+  backend-tests:
+    name: Backend · миграции Alembic и тесты
+    runs-on: ubuntu-latest
+    needs: [backend-quality, database]
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: putzplan_ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      DB_NAME: putzplan_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+      APP_ENV: test
+      DB_MIGRATION_PASSWORD: ci_migration
+      DB_RUNTIME_PASSWORD: ci_runtime
+      DB_AUDIT_PASSWORD: ci_audit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Зависимости
+        run: pip install -e "backend[dev]" psycopg2-binary pyyaml
+      - name: Bootstrap ролей
+        run: |
+          psql -v ON_ERROR_STOP=1 -d putzplan_ci \
+            -v mig_pw=ci_migration -v run_pw=ci_runtime -v aud_pw=ci_audit -v ro_pw=ci_readonly \
+            -f infrastructure/db/migrations/00_platform_bootstrap.sql
+          psql -d putzplan_ci -c "GRANT CREATE ON DATABASE putzplan_ci TO putzplan_migration"
+      - name: Alembic upgrade head на чистой базе
+        run: cd backend && python -m alembic upgrade head
+      - name: Alembic downgrade/upgrade последней миграции
+        run: cd backend && python -m alembic downgrade -1 && python -m alembic upgrade head
+      - name: Демонстрационные данные
+        run: cd backend && PYTHONPATH=. python ../infrastructure/scripts/seed_dev.py
+      - name: Unit и integration тесты
+        run: cd backend && python -m pytest -q --junitxml=../pytest-report.xml
+      - name: Проверка контракта OpenAPI
+        run: |
+          cd backend && PYTHONPATH=. python ../infrastructure/scripts/export_openapi.py
+          cd .. && python - <<'PY'
+          import json, sys
+          schema = json.load(open('openapi/openapi.json'))
+          assert schema['openapi'].startswith('3.1'), 'ожидается OpenAPI 3.1'
+          required = ['/api/v1/auth/login', '/api/v1/me', '/api/v1/users',
+                      '/api/v1/roles', '/api/v1/audit-logs', '/health', '/ready']
+          missing = [p for p in required if p not in schema['paths']]
+          assert not missing, f'в контракте нет путей: {missing}'
+          print(f"OpenAPI 3.1 валиден: {len(schema['paths'])} путей")
+          PY
+      - name: Контракт в репозитории совпадает с кодом
+        run: |
+          git diff --exit-code openapi/ \
+            || (echo "openapi/ устарел: выполните make openapi и закоммитьте результат" && exit 1)
+      - name: Фикстуры гейта совместимости
+        run: cd backend && python -m pytest tests/test_openapi_compat.py -q
+      - name: Breaking changes контракта (схемы, коды, enum, required)
+        run: |
+          git fetch origin ${{ github.base_ref || 'main' }} --depth=1 || exit 0
+          git show origin/${{ github.base_ref || 'main' }}:openapi/openapi.json > /tmp/base.json 2>/dev/null || exit 0
+          python infrastructure/scripts/openapi_diff.py /tmp/base.json openapi/openapi.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: pytest-report, path: pytest-report.xml }
+
+  frontend:
+    name: Frontend · типы, тесты, сборка
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+        working-directory: frontend
+      - name: Проверка типов
+        run: npm run lint
+        working-directory: frontend
+      - name: Модульные тесты
+        run: npx vitest run
+        working-directory: frontend
+      - name: Сборка
+        run: npm run build
+        working-directory: frontend
+      - name: Уязвимости зависимостей npm (блокирует сборку)
+        run: npm audit --audit-level=high
+        working-directory: frontend
+      - name: Синхронность package-lock.json
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          git diff --exit-code package-lock.json \
+            || (echo "package-lock.json не синхронизирован с package.json" && exit 1)
+        working-directory: frontend
+
+  e2e:
+    name: E2E · Playwright smoke
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend]
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: putzplan_ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 3s --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      DB_NAME: putzplan_ci
+      DB_MIGRATION_PASSWORD: ci_migration
+      DB_RUNTIME_PASSWORD: ci_runtime
+      DB_AUDIT_PASSWORD: ci_audit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: pip install -e "backend[dev]" psycopg2-binary pyyaml
+      - name: Подготовка базы
+        run: |
+          psql -v ON_ERROR_STOP=1 -d putzplan_ci -v mig_pw=ci_migration -v run_pw=ci_runtime \
+               -v aud_pw=ci_audit -v ro_pw=ci_readonly \
+               -f infrastructure/db/migrations/00_platform_bootstrap.sql
+          psql -d putzplan_ci -c "GRANT CREATE ON DATABASE putzplan_ci TO putzplan_migration"
+          cd backend && python -m alembic upgrade head && PYTHONPATH=. python ../infrastructure/scripts/seed_dev.py
+      - name: Запуск API
+        run: cd backend && (python -m uvicorn app.main:app --port 8000 &) && sleep 5
+      - name: Smoke вертикального среза
+        run: cd backend && python tests/smoke_vertical_slice.py
+      - name: Playwright
+        run: |
+          cd frontend && npm ci && npx playwright install --with-deps chromium
+          npm run build && (npx vite preview --port 5173 &) && sleep 4
+          npx playwright test
+        continue-on-error: false
+
+  security:
+    name: Безопасность · зависимости и SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Bandit (SAST)
+        run: pip install bandit && bandit -r backend/app -ll
+      - name: Уязвимости зависимостей Python (блокирует сборку)
+        run: |
+          pip install -e "backend[dev]" pip-audit
+          # Исключения допускаются только через файл allowlist с CVE и сроком
+          if [ -f security/pip-audit-allowlist.txt ]; then
+            IGNORES=$(grep -vE '^#|^$' security/pip-audit-allowlist.txt | awk '{printf "--ignore-vuln %s ", $1}')
+          fi
+          pip-audit --strict $IGNORES
+      - name: Секреты в коде
+        run: |
+          ! grep -rInE "(password|secret|token)[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_-]{12,}" \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.sql' --include='*.yml' \
+            backend/app frontend/src infrastructure . \
+            | grep -v 'change_me\|test_\|dev-only\|ci_\|demo\|example' \
+            || (echo "Найдены возможные секреты" && exit 1)
+      - name: Запрет TODO в миграциях
+        run: '! grep -rn "TODO\|FIXME" infrastructure/db/migrations backend/alembic/versions || exit 1'
+
+  docker:
+    name: Docker · сборка и compose smoke
+    runs-on: ubuntu-latest
+    needs: [backend-quality, database, backend-tests, frontend, security]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Сборка образов
+        run: |
+          docker build -f infrastructure/docker/backend.Dockerfile -t putzplan-api:ci .
+          docker build -f infrastructure/docker/frontend.Dockerfile -t putzplan-ui:ci .
+      - name: Запуск полной среды с чистого тома
+        run: |
+          cp .env.example .env
+          docker compose up --build -d
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8000/health >/dev/null && break || sleep 2
+          done
+          curl -fsS http://localhost:8000/ready | tee /tmp/ready.json
+          grep -q '"status":"ready"' /tmp/ready.json
+      - name: Демонстрационные данные внутри контейнера
+        run: docker compose exec -T api python -m scripts.seed_container
+      - name: Compose smoke — вход, /me, пользователь, роль, отказ, изоляция
+        run: pip install httpx && python backend/tests/smoke_compose.py
+        env:
+          API_BASE: http://localhost:8000
+      - name: Повторный чистый запуск после down -v
+        run: |
+          docker compose down -v
+          docker compose up --build -d
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8000/health >/dev/null && break || sleep 2
+          done
+          curl -fsS http://localhost:8000/ready | grep -q '"status":"ready"'
+      - name: Логи при ошибке
+        if: failure()
+        run: docker compose logs --no-color | tail -200
+      - name: Остановка
+        if: always()
+        run: docker compose down -v
+
+  release-gate:
+    name: Release Gate — все обязательные проверки
+    runs-on: ubuntu-latest
+    needs: [backend-quality, database, backend-tests, frontend, e2e, security, docker]
+    steps:
+      - name: Подтверждение
+        run: echo "Все обязательные проверки пройдены — релиз разрешён"
