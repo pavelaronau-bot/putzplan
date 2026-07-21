@@ -16,7 +16,7 @@ class AuditRepository:
                      after: dict[str, Any] | None, reason: str | None, ip: str | None,
                      user_agent: str | None, http_status: int | None) -> dict:
         import json
-        row = rows = (await self.session.execute(text(f"""  # nosec B608
+       row = (await self.session.execute(text("""
             INSERT INTO audit_logs (company_id, request_id, user_id, actor_kind, actor_role,
                                     action, entity, entity_id, before, after, reason,
                                     ip, user_agent, http_status)
