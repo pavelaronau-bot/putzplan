@@ -1,6 +1,7 @@
 """Первичное наполнение: компания-владелец и учётные записи.
 В production запрещено: сид демонстрационных данных отключён проверкой окружения."""
 import asyncio
+import os
 import sys
 from uuid import UUID
 
@@ -29,10 +30,12 @@ async def main() -> None:
         raise SystemExit(1)
 
     import asyncpg
-    conn = await asyncpg.connect(host=settings.db_host, port=settings.db_port,
-                                 database=settings.db_name,
-                                 user="putzplan_migration",
-                                 password="test_migration")
+    # Учётные данные роли провижининга берутся из окружения: в CI и в
+    # контейнере они отличаются от локальных значений разработчика.
+    conn = await asyncpg.connect(
+        host=settings.db_host, port=settings.db_port, database=settings.db_name,
+        user=os.environ.get("DB_MIGRATION_USER", "putzplan_migration"),
+        password=os.environ.get("DB_MIGRATION_PASSWORD", "test_migration"))
     await conn.execute(
         "INSERT INTO companies (id,name,bundesland) VALUES ($1,'Demo Gebäudereinigung GmbH','Bayern')"
         " ON CONFLICT (id) DO NOTHING", COMPANY)

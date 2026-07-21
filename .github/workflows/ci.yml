@@ -1,8 +1,25 @@
 name: CI
 
+# Ручной запуск нужен для внешней проверки Sprint 1: владелец репозитория
+# открывает Actions → CI → Run workflow и получает ссылки на прогоны.
 on:
-  push: { branches: [main, develop] }
+  push:
+    branches: [main, develop]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      allow_missing_openapi_baseline:
+        description: "Разрешить отсутствие базового openapi.json (только первичная загрузка)"
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.12"
@@ -15,12 +32,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install ruff mypy
-      - name: Ruff
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Установка инструментов
+        run: python -m pip install --upgrade pip ruff mypy
+      - name: Ruff (блокирует сборку)
         run: ruff check backend/app backend/tests
       - name: Mypy (блокирует сборку)
-        run: cd backend && mypy app
+        run: |
+          python -m pip install -e "backend[dev]"
+          cd backend && mypy app
 
   database:
     name: База · миграции и SQL-тесты
@@ -28,27 +50,31 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4
-        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: postgres }
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s
-          --health-timeout 3s --health-retries 12
+          --health-timeout 3s --health-retries 20
     env:
       PGHOST: 127.0.0.1
       PGUSER: postgres
       PGPASSWORD: postgres
-      PUTZPLAN_MIGRATION_PW: ci_migration
-      PUTZPLAN_RUNTIME_PW: ci_runtime
-      PUTZPLAN_AUDIT_PW: ci_audit
-      PUTZPLAN_READONLY_PW: ci_readonly
+      PUTZPLAN_MIGRATION_PW: ${{ secrets.CI_DB_MIGRATION_PASSWORD || 'ci_migration' }}
+      PUTZPLAN_RUNTIME_PW: ${{ secrets.CI_DB_RUNTIME_PASSWORD || 'ci_runtime' }}
+      PUTZPLAN_AUDIT_PW: ${{ secrets.CI_DB_AUDIT_PASSWORD || 'ci_audit' }}
+      PUTZPLAN_READONLY_PW: ${{ secrets.CI_DB_READONLY_PASSWORD || 'ci_readonly' }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      - name: SQL-тесты укрепления базы (падает при любом failed)
+      - name: Клиент PostgreSQL
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: SQL-тесты укрепления базы (56 проверок, падает при любом failed)
         run: bash infrastructure/db/tests/run_tests.sh putzplan_ci
-      - name: Структурная валидация
-        run: PGPASSWORD=$PUTZPLAN_MIGRATION_PW psql -v ON_ERROR_STOP=1 -h 127.0.0.1
-             -U putzplan_migration -d putzplan_ci -f infrastructure/db/validate.sql
+      - name: Структурная валидация схемы
+        run: |
+          PGPASSWORD="$PUTZPLAN_MIGRATION_PW" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
+            -U putzplan_migration -d putzplan_ci -f infrastructure/db/validate.sql
 
   backend-tests:
     name: Backend · миграции Alembic и тесты
@@ -57,11 +83,13 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4
-        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: putzplan_ci }
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: putzplan_ci
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s
-          --health-timeout 3s --health-retries 12
+          --health-timeout 3s --health-retries 20
       redis:
         image: redis:7-alpine
         ports: ["6379:6379"]
@@ -75,75 +103,85 @@ jobs:
       DB_NAME: putzplan_ci
       REDIS_URL: redis://127.0.0.1:6379/0
       APP_ENV: test
-      DB_MIGRATION_PASSWORD: ci_migration
-      DB_RUNTIME_PASSWORD: ci_runtime
-      DB_AUDIT_PASSWORD: ci_audit
+      DB_MIGRATION_PASSWORD: ${{ secrets.CI_DB_MIGRATION_PASSWORD || 'ci_migration' }}
+      DB_RUNTIME_PASSWORD: ${{ secrets.CI_DB_RUNTIME_PASSWORD || 'ci_runtime' }}
+      DB_AUDIT_PASSWORD: ${{ secrets.CI_DB_AUDIT_PASSWORD || 'ci_audit' }}
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Клиент PostgreSQL
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Зависимости
-        run: pip install -e "backend[dev]" psycopg2-binary pyyaml
-      - name: Bootstrap ролей
+        run: python -m pip install --upgrade pip && python -m pip install -e "backend[dev]" psycopg2-binary pyyaml
+      - name: Bootstrap ролей базы
         run: |
           psql -v ON_ERROR_STOP=1 -d putzplan_ci \
-            -v mig_pw=ci_migration -v run_pw=ci_runtime -v aud_pw=ci_audit -v ro_pw=ci_readonly \
+            -v mig_pw="$DB_MIGRATION_PASSWORD" -v run_pw="$DB_RUNTIME_PASSWORD" \
+            -v aud_pw="$DB_AUDIT_PASSWORD" -v ro_pw="${{ secrets.CI_DB_READONLY_PASSWORD || 'ci_readonly' }}" \
             -f infrastructure/db/migrations/00_platform_bootstrap.sql
           psql -d putzplan_ci -c "GRANT CREATE ON DATABASE putzplan_ci TO putzplan_migration"
       - name: Alembic upgrade head на чистой базе
         run: cd backend && python -m alembic upgrade head
-      - name: Alembic downgrade/upgrade последней миграции
+      - name: Alembic downgrade -1 и обратный upgrade
         run: cd backend && python -m alembic downgrade -1 && python -m alembic upgrade head
       - name: Демонстрационные данные
         run: cd backend && PYTHONPATH=. python ../infrastructure/scripts/seed_dev.py
       - name: Unit и integration тесты
         run: cd backend && python -m pytest -q --junitxml=../pytest-report.xml
-      - name: Проверка контракта OpenAPI
-        run: |
-          cd backend && PYTHONPATH=. python ../infrastructure/scripts/export_openapi.py
-          cd .. && python - <<'PY'
-          import json, sys
-          schema = json.load(open('openapi/openapi.json'))
-          assert schema['openapi'].startswith('3.1'), 'ожидается OpenAPI 3.1'
-          required = ['/api/v1/auth/login', '/api/v1/me', '/api/v1/users',
-                      '/api/v1/roles', '/api/v1/audit-logs', '/health', '/ready']
-          missing = [p for p in required if p not in schema['paths']]
-          assert not missing, f'в контракте нет путей: {missing}'
-          print(f"OpenAPI 3.1 валиден: {len(schema['paths'])} путей")
-          PY
+      - name: Генерация контракта OpenAPI
+        run: cd backend && PYTHONPATH=. python ../infrastructure/scripts/export_openapi.py
       - name: Контракт в репозитории совпадает с кодом
         run: |
           git diff --exit-code openapi/ \
             || (echo "openapi/ устарел: выполните make openapi и закоммитьте результат" && exit 1)
+      - name: Структура контракта OpenAPI 3.1
+        run: |
+          python - <<'PY'
+          import json, sys
+          schema = json.load(open('openapi/openapi.json'))
+          assert schema['openapi'].startswith('3.1'), 'ожидается OpenAPI 3.1'
+          required = ['/api/v1/auth/login', '/api/v1/auth/refresh', '/api/v1/me',
+                      '/api/v1/users', '/api/v1/roles', '/api/v1/audit-logs',
+                      '/health', '/ready']
+          missing = [p for p in required if p not in schema['paths']]
+          if missing:
+              print('в контракте нет путей:', missing, file=sys.stderr)
+              sys.exit(1)
+          print(f"OpenAPI 3.1 валиден: {len(schema['paths'])} путей")
+          PY
       - name: Фикстуры гейта совместимости
         run: cd backend && python -m pytest tests/test_openapi_compat.py -q
       - name: Breaking changes контракта (fail-closed)
         env:
-          # Отсутствие базового контракта допускается только при первичной
-          # загрузке репозитория и требует явного признания через переменную.
-          ALLOW_MISSING_OPENAPI_BASELINE: ${{ vars.ALLOW_MISSING_OPENAPI_BASELINE }}
-          BASE_REF: ${{ github.base_ref || 'main' }}
+          ALLOW_MISSING_OPENAPI_BASELINE: ${{ inputs.allow_missing_openapi_baseline || vars.ALLOW_MISSING_OPENAPI_BASELINE }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
           if ! git fetch origin "$BASE_REF" --depth=1; then
-            echo "Не удалось получить ветку $BASE_REF — проверка контракта невозможна"
+            echo "Не удалось получить ветку $BASE_REF — проверка контракта невозможна" >&2
             exit 1
           fi
-          if ! git show "origin/$BASE_REF:openapi/openapi.json" > /tmp/base.json 2>/dev/null; then
-            if [ "${ALLOW_MISSING_OPENAPI_BASELINE:-false}" = "true" ]; then
-              echo "::warning::Базовый контракт отсутствует, режим первичной загрузки разрешён явно"
-              exit 0
-            fi
+          if git show "origin/$BASE_REF:openapi/openapi.json" > /tmp/base.json; then
+            python infrastructure/scripts/openapi_diff.py /tmp/base.json openapi/openapi.json
+          elif [ "${ALLOW_MISSING_OPENAPI_BASELINE:-false}" = "true" ]; then
+            echo "::warning::Базовый контракт отсутствует, режим первичной загрузки разрешён явно"
+          else
             echo "В ветке $BASE_REF нет openapi/openapi.json." >&2
-            echo "Это либо ошибка, либо первичная загрузка: включите переменную" >&2
-            echo "ALLOW_MISSING_OPENAPI_BASELINE=true осознанно и на один прогон." >&2
+            echo "Это либо ошибка, либо первичная загрузка: запустите workflow вручную" >&2
+            echo "с параметром allow_missing_openapi_baseline = true." >&2
             exit 1
           fi
-          python infrastructure/scripts/openapi_diff.py /tmp/base.json openapi/openapi.json
-      - uses: actions/upload-artifact@v4
+      - name: Отчёт тестов
         if: always()
-        with: { name: pytest-report, path: pytest-report.xml }
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: pytest-report.xml
+          if-no-files-found: warn
 
   frontend:
     name: Frontend · типы, тесты, сборка
@@ -151,8 +189,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
-      - run: npm ci
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Чистая установка зависимостей
+        run: npm ci
         working-directory: frontend
       - name: Проверка типов
         run: npm run lint
@@ -174,49 +216,105 @@ jobs:
         working-directory: frontend
 
   e2e:
-    name: E2E · Playwright smoke
+    name: E2E · Playwright Chromium
     runs-on: ubuntu-latest
     needs: [backend-tests, frontend]
     services:
       postgres:
         image: postgis/postgis:16-3.4
-        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: putzplan_ci }
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: putzplan_ci
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s
-          --health-timeout 3s --health-retries 12
+          --health-timeout 3s --health-retries 20
     env:
       PGHOST: 127.0.0.1
       PGUSER: postgres
       PGPASSWORD: postgres
       DB_NAME: putzplan_ci
-      DB_MIGRATION_PASSWORD: ci_migration
-      DB_RUNTIME_PASSWORD: ci_runtime
-      DB_AUDIT_PASSWORD: ci_audit
+      APP_ENV: development
+      DB_MIGRATION_PASSWORD: ${{ secrets.CI_DB_MIGRATION_PASSWORD || 'ci_migration' }}
+      DB_RUNTIME_PASSWORD: ${{ secrets.CI_DB_RUNTIME_PASSWORD || 'ci_runtime' }}
+      DB_AUDIT_PASSWORD: ${{ secrets.CI_DB_AUDIT_PASSWORD || 'ci_audit' }}
+      E2E_BASE_URL: http://localhost:5173
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
+          cache: pip
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      - run: pip install -e "backend[dev]" psycopg2-binary pyyaml
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Клиент PostgreSQL
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Зависимости backend
+        run: python -m pip install --upgrade pip && python -m pip install -e "backend[dev]" psycopg2-binary pyyaml
       - name: Подготовка базы
         run: |
-          psql -v ON_ERROR_STOP=1 -d putzplan_ci -v mig_pw=ci_migration -v run_pw=ci_runtime \
-               -v aud_pw=ci_audit -v ro_pw=ci_readonly \
-               -f infrastructure/db/migrations/00_platform_bootstrap.sql
+          psql -v ON_ERROR_STOP=1 -d putzplan_ci \
+            -v mig_pw="$DB_MIGRATION_PASSWORD" -v run_pw="$DB_RUNTIME_PASSWORD" \
+            -v aud_pw="$DB_AUDIT_PASSWORD" -v ro_pw="${{ secrets.CI_DB_READONLY_PASSWORD || 'ci_readonly' }}" \
+            -f infrastructure/db/migrations/00_platform_bootstrap.sql
           psql -d putzplan_ci -c "GRANT CREATE ON DATABASE putzplan_ci TO putzplan_migration"
-          cd backend && python -m alembic upgrade head && PYTHONPATH=. python ../infrastructure/scripts/seed_dev.py
-      - name: Запуск API
-        run: cd backend && (python -m uvicorn app.main:app --port 8000 &) && sleep 5
-      - name: Smoke вертикального среза
-        run: cd backend && python tests/smoke_vertical_slice.py
-      - name: Playwright
+          (cd backend && python -m alembic upgrade head)
+          PYTHONPATH=backend python infrastructure/scripts/seed_dev.py
+      - name: Запуск API и ожидание готовности
         run: |
-          cd frontend && npm ci && npx playwright install --with-deps chromium
-          npm run build && (npx vite preview --port 5173 &) && sleep 4
-          npx playwright test
+          set -euo pipefail
+          cd backend
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/api.pid"
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              echo "API готов после $i попыток"; exit 0
+            fi
+            sleep 1
+          done
+          echo "API не поднялся за 40 секунд" >&2
+          cat "$RUNNER_TEMP/api.log" >&2
+          exit 1
+      - name: Smoke вертикального среза по HTTP
+        run: cd backend && python tests/smoke_vertical_slice.py
+      - name: Установка зависимостей и браузера Chromium
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Сборка и запуск фронтенда
+        run: |
+          set -euo pipefail
+          npm run build
+          nohup npx vite preview --port 5173 --strictPort > "$RUNNER_TEMP/frontend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/frontend.pid"
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:5173/ > /dev/null; then
+              echo "Фронтенд готов после $i попыток"; exit 0
+            fi
+            sleep 1
+          done
+          echo "Фронтенд не поднялся за 30 секунд" >&2
+          cat "$RUNNER_TEMP/frontend.log" >&2
+          exit 1
+        working-directory: frontend
+        env:
+          VITE_API_PROXY_TARGET: http://127.0.0.1:8000
+      - name: Playwright тесты
+        run: npx playwright test
+        working-directory: frontend
+      - name: Отчёты и логи
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: warn
 
   security:
     name: Безопасность · зависимости и SAST
@@ -224,64 +322,116 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
+          cache: pip
       - name: Bandit (SAST)
-        run: pip install bandit && bandit -r backend/app -ll
+        run: python -m pip install bandit && bandit -r backend/app -ll
       - name: Уязвимости зависимостей Python (блокирует сборку)
         run: |
-          pip install -e "backend[dev]" pip-audit
-          # Исключения допускаются только через файл allowlist с CVE и сроком
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e "backend[dev]" pip-audit
+          IGNORES=""
           if [ -f security/pip-audit-allowlist.txt ]; then
             IGNORES=$(grep -vE '^#|^$' security/pip-audit-allowlist.txt | awk '{printf "--ignore-vuln %s ", $1}')
           fi
+          # shellcheck disable=SC2086
           pip-audit --strict $IGNORES
       - name: Секреты в коде
         run: |
           ! grep -rInE "(password|secret|token)[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_-]{12,}" \
             --include='*.py' --include='*.ts' --include='*.tsx' --include='*.sql' --include='*.yml' \
-            backend/app frontend/src infrastructure . \
+            backend/app frontend/src infrastructure \
             | grep -v 'change_me\|test_\|dev-only\|ci_\|demo\|example' \
             || (echo "Найдены возможные секреты" && exit 1)
       - name: Запрет TODO в миграциях
         run: '! grep -rn "TODO\|FIXME" infrastructure/db/migrations backend/alembic/versions || exit 1'
 
   docker:
-    name: Docker · сборка и compose smoke
+    name: Docker · сборка, запуск, smoke, повторный чистый старт
     runs-on: ubuntu-latest
     needs: [backend-quality, database, backend-tests, frontend, security]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Версии Docker
+        run: |
+          docker --version
+          docker compose version
+      - name: Подготовка окружения
+        run: cp .env.example .env
+      - name: Валидация compose-файла
+        run: docker compose config > /dev/null
       - name: Сборка образов
         run: |
+          set -euo pipefail
           docker build -f infrastructure/docker/backend.Dockerfile -t putzplan-api:ci .
           docker build -f infrastructure/docker/frontend.Dockerfile -t putzplan-ui:ci .
-      - name: Запуск полной среды с чистого тома
+      - name: Первый запуск с чистого тома
         run: |
-          cp .env.example .env
+          set -euo pipefail
           docker compose up --build -d
           for i in $(seq 1 60); do
-            curl -fsS http://localhost:8000/health >/dev/null && break || sleep 2
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              echo "API поднялся после $i попыток"; break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "API не поднялся за 120 секунд" >&2
+              docker compose ps
+              docker compose logs --no-color | tail -200
+              exit 1
+            fi
+            sleep 2
           done
+      - name: Проверка /health
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:8000/health | tee /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+      - name: Проверка /ready
+        run: |
+          set -euo pipefail
           curl -fsS http://localhost:8000/ready | tee /tmp/ready.json
           grep -q '"status":"ready"' /tmp/ready.json
+          grep -q '"db_runtime":"ok"' /tmp/ready.json
+          grep -q '"db_audit":"ok"' /tmp/ready.json
       - name: Демонстрационные данные внутри контейнера
         run: docker compose exec -T api python -m scripts.seed_container
-      - name: Compose smoke — вход, /me, пользователь, роль, отказ, изоляция
-        run: pip install httpx && python backend/tests/smoke_compose.py
+      - name: Compose smoke — вход, права, изоляция, журнал
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip httpx
+          python backend/tests/smoke_compose.py
         env:
           API_BASE: http://localhost:8000
-      - name: Повторный чистый запуск после down -v
+      - name: Проверка фронтенда за nginx
         run: |
-          docker compose down -v
+          set -euo pipefail
+          curl -fsS http://localhost:8080/ | grep -qi "<!doctype html"
+      - name: Остановка с удалением томов
+        run: docker compose down -v
+      - name: Повторный чистый запуск
+        run: |
+          set -euo pipefail
           docker compose up --build -d
           for i in $(seq 1 60); do
-            curl -fsS http://localhost:8000/health >/dev/null && break || sleep 2
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              echo "Повторный запуск успешен после $i попыток"; break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Повторный запуск не удался" >&2
+              docker compose logs --no-color | tail -200
+              exit 1
+            fi
+            sleep 2
           done
           curl -fsS http://localhost:8000/ready | grep -q '"status":"ready"'
       - name: Логи при ошибке
         if: failure()
-        run: docker compose logs --no-color | tail -200
-      - name: Остановка
+        run: docker compose logs --no-color | tail -300
+      - name: Финальная остановка
         if: always()
         run: docker compose down -v
 
@@ -296,15 +446,15 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          echo "$RESULTS"
           python3 - <<'PY'
           import json, os, sys
           results = json.loads(os.environ["RESULTS"])
-          failed = [name for name, data in results.items() if data.get("result") != "success"]
+          print("Результаты обязательных задач:")
           for name, data in sorted(results.items()):
               print(f"  {name:18} {data.get('result')}")
+          failed = [n for n, d in results.items() if d.get("result") != "success"]
           if failed:
-              print("Release Gate НЕ пройден: " + ", ".join(failed), file=sys.stderr)
+              print("\nRelease Gate НЕ пройден: " + ", ".join(sorted(failed)), file=sys.stderr)
               sys.exit(1)
-          print("Release Gate пройден: все обязательные задачи успешны")
+          print("\nRelease Gate пройден: все обязательные задачи успешны")
           PY
