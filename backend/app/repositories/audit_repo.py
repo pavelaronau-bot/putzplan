@@ -1,5 +1,6 @@
 """Журнал действий: запись отдельной ролью, чтение — обычной."""
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -28,8 +29,6 @@ class AuditRepository:
         user_agent: str | None,
         http_status: int | None,
     ) -> dict:
-        import json
-
         row = (
             await self.session.execute(
                 text(
@@ -79,12 +78,12 @@ class AuditRepository:
                     "eid": str(entity_id) if entity_id else None,
                     "before": (
                         json.dumps(before, ensure_ascii=False)
-                        if before
+                        if before is not None
                         else None
                     ),
                     "after": (
                         json.dumps(after, ensure_ascii=False)
-                        if after
+                        if after is not None
                         else None
                     ),
                     "reason": reason,
@@ -127,43 +126,43 @@ class AuditRepository:
 
         clause = " AND ".join(where)
 
+        rows_sql = (
+            "SELECT "
+            "chain_seq, "
+            "id, "
+            "server_time, "
+            "request_id, "
+            "user_id, "
+            "actor_role, "
+            "action, "
+            "entity, "
+            "entity_id, "
+            "reason, "
+            "http_status, "
+            "before AS metadata_before, "
+            "after AS metadata_after "
+            "FROM audit_logs "
+            f"WHERE {clause} "  # nosec B608
+            "ORDER BY chain_seq DESC "
+            "LIMIT :limit OFFSET :offset"
+        )
+
         rows = (
             await self.session.execute(
-                text(  # nosec B608
-                    f"""
-                    SELECT
-                        chain_seq,
-                        id,
-                        server_time,
-                        request_id,
-                        user_id,
-                        actor_role,
-                        action,
-                        entity,
-                        entity_id,
-                        reason,
-                        http_status,
-                        before AS metadata_before,
-                        after AS metadata_after
-                    FROM audit_logs
-                    WHERE {clause}
-                    ORDER BY chain_seq DESC
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
+                text(rows_sql),
                 params,
             )
         ).mappings().all()
 
+        count_sql = (
+            "SELECT count(*) "
+            "FROM audit_logs "
+            f"WHERE {clause}"  # nosec B608
+        )
+
         total = (
             await self.session.execute(
-                text(  # nosec B608
-                    f"""
-                    SELECT count(*)
-                    FROM audit_logs
-                    WHERE {clause}
-                    """
-                ),
+                text(count_sql),
                 params,
             )
         ).scalar_one()
