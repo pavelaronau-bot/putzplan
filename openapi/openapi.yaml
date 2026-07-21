@@ -82,7 +82,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -125,7 +125,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -156,7 +156,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/OkResponse'
         '422':
-          description: Validation Error
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -187,7 +187,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -224,7 +224,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -335,7 +335,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
     post:
       tags:
       - users
@@ -383,7 +383,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/users/{user_id}:
     get:
       tags:
@@ -434,7 +434,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
     patch:
       tags:
       - users
@@ -490,7 +490,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/users/{user_id}/deactivate:
     post:
       tags:
@@ -547,7 +547,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/users/{user_id}/sessions:
     get:
       tags:
@@ -601,7 +601,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/users/{user_id}/sessions/{session_id}:
     delete:
       tags:
@@ -659,7 +659,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/roles:
     get:
       tags:
@@ -701,7 +701,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -749,7 +749,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -804,7 +804,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
     patch:
       tags:
       - roles
@@ -860,7 +860,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/roles/{role_id}/permissions:
     put:
       tags:
@@ -917,7 +917,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Unprocessable Content
+          description: Unprocessable Entity
   /api/v1/permissions:
     get:
       tags:
@@ -959,7 +959,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -1025,7 +1025,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
           description: Forbidden
         '422':
-          description: Validation Error
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
