@@ -29,4 +29,5 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["serial: тест меняет схему базы и не должен идти параллельно"]
 testpaths = ["tests"]

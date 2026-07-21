@@ -123,18 +123,109 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Возврат к поведению ревизии 0003.
+
+    Восстанавливается настоящая реализация auth_rotate_session из 0003
+    (пять аргументов, состояния rotated/reuse/race_lost/expired/inactive_user),
+    а не заглушка. Дополнительно создаётся совместимая обёртка с шестым
+    аргументом p_grace_seconds: код приложения текущего релиза вызывает
+    функцию именно так, и после отката он обязан остаться работоспособным.
+    Обёртка аргумент игнорирует — семантика возвращается к прежней, где
+    параллельная гонка трактуется как повторное использование.
+    """
     op.execute("DROP FUNCTION IF EXISTS auth_rotate_session(text, text, inet, text, int, int)")
-    op.execute("DROP INDEX IF EXISTS sessions_rotated_ix")
-    op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS replaced_by_session_id")
-    op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS rotated_at")
-    # Восстанавливаем предыдущую версию функции из ревизии 0003
+    op.execute("DROP FUNCTION IF EXISTS auth_rotate_session(text, text, inet, text, int)")
+
     op.execute("""
     CREATE OR REPLACE FUNCTION auth_rotate_session(
         p_old_hash text, p_new_hash text, p_ip inet, p_user_agent text, p_ttl_days int)
     RETURNS TABLE (result text, session_id uuid, user_id uuid, company_id uuid,
                    role_key text, family_id uuid, revoked_count int)
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+    DECLARE
+        old_row     sessions%ROWTYPE;
+        usr         record;
+        new_id      uuid;
+        n           int := 0;
     BEGIN
-        result := 'not_found'; RETURN NEXT;
+        SELECT * INTO old_row FROM sessions
+         WHERE refresh_token_hash = p_old_hash
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            result := 'not_found'; RETURN NEXT; RETURN;
+        END IF;
+
+        SELECT u.id, u.company_id, u.status::text AS status, r.key AS role_key
+          INTO usr
+          FROM users u JOIN roles r ON r.id = u.role_id
+         WHERE u.id = old_row.user_id;
+
+        IF old_row.revoked_at IS NOT NULL THEN
+            UPDATE sessions SET revoked_at = now(), revoke_reason = 'reuse_detected'
+             WHERE token_family_id = old_row.token_family_id AND revoked_at IS NULL;
+            GET DIAGNOSTICS n = ROW_COUNT;
+            result := 'reuse'; session_id := old_row.id; user_id := old_row.user_id;
+            company_id := usr.company_id; role_key := usr.role_key;
+            family_id := old_row.token_family_id; revoked_count := n;
+            RETURN NEXT; RETURN;
+        END IF;
+
+        IF old_row.expires_at <= now() THEN
+            result := 'expired'; RETURN NEXT; RETURN;
+        END IF;
+
+        IF usr.status <> 'active' THEN
+            result := 'inactive_user'; RETURN NEXT; RETURN;
+        END IF;
+
+        UPDATE sessions SET revoked_at = now(), revoke_reason = 'rotated'
+         WHERE id = old_row.id AND revoked_at IS NULL;
+        GET DIAGNOSTICS n = ROW_COUNT;
+        IF n = 0 THEN
+            result := 'race_lost'; RETURN NEXT; RETURN;
+        END IF;
+
+        INSERT INTO sessions (user_id, refresh_token_hash, ip, user_agent, expires_at,
+                              last_seen_at, token_family_id, parent_session_id)
+        VALUES (old_row.user_id, p_new_hash, p_ip, p_user_agent,
+                now() + make_interval(days => p_ttl_days), now(),
+                old_row.token_family_id, old_row.id)
+        RETURNING id INTO new_id;
+
+        result := 'rotated'; session_id := new_id; user_id := old_row.user_id;
+        company_id := usr.company_id; role_key := usr.role_key;
+        family_id := old_row.token_family_id; revoked_count := 0;
+        RETURN NEXT;
     END $$;
     """)
+
+    # Совместимость с кодом текущего релиза: тот же результат, аргумент окна игнорируется
+    op.execute("""
+    CREATE OR REPLACE FUNCTION auth_rotate_session(
+        p_old_hash text, p_new_hash text, p_ip inet, p_user_agent text,
+        p_ttl_days int, p_grace_seconds int)
+    RETURNS TABLE (result text, session_id uuid, user_id uuid, company_id uuid,
+                   role_key text, family_id uuid, revoked_count int,
+                   replacement_session_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+    DECLARE r record;
+    BEGIN
+        FOR r IN SELECT * FROM auth_rotate_session(p_old_hash, p_new_hash, p_ip,
+                                                   p_user_agent, p_ttl_days) LOOP
+            result := r.result; session_id := r.session_id; user_id := r.user_id;
+            company_id := r.company_id; role_key := r.role_key;
+            family_id := r.family_id; revoked_count := r.revoked_count;
+            replacement_session_id := NULL;
+            RETURN NEXT;
+        END LOOP;
+    END $$;
+    """)
+
+    for signature in ("text, text, inet, text, int", "text, text, inet, text, int, int"):
+        op.execute(f"REVOKE EXECUTE ON FUNCTION auth_rotate_session({signature}) FROM PUBLIC")
+        op.execute(f"GRANT EXECUTE ON FUNCTION auth_rotate_session({signature}) TO putzplan_runtime")
+
+    op.execute("DROP INDEX IF EXISTS sessions_rotated_ix")
+    op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS replaced_by_session_id")
+    op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS rotated_at")
