@@ -43,6 +43,3 @@ asyncio_mode = "auto"
 markers = ["serial: тест меняет схему базы и не должен идти параллельно"]
 testpaths = ["tests"]
 
-[tool.setuptools.packages.find]
-include = ["app*"]
-exclude = ["alembic*"]
