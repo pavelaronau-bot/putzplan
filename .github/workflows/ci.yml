@@ -328,16 +328,9 @@ jobs:
       - name: Bandit (SAST)
         run: python -m pip install bandit && bandit -r backend/app -ll
       - name: Уязвимости зависимостей Python (блокирует сборку)
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -e "backend[dev]" pip-audit
-          IGNORES=""
-          if [ -f security/pip-audit-allowlist.txt ]; then
-            IGNORES=$(grep -vE '^#|^$' security/pip-audit-allowlist.txt | awk '{printf "--ignore-vuln %s ", $1}')
-          fi
-          # shellcheck disable=SC2086
-          pip-audit --strict $IGNORES
+        # Тот же скрипт запускается локально командой make security,
+        # поэтому расхождений между машиной разработчика и CI нет.
+        run: bash infrastructure/scripts/audit_python_deps.sh
       - name: Секреты в коде
         run: |
           ! grep -rInE "(password|secret|token)[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_-]{12,}" \

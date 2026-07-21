@@ -1,12 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "putzplan-backend"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi>=0.115,<0.116", "uvicorn[standard]>=0.32,<0.33",
+  "fastapi>=0.139,<0.140",
+  # starlette закреплён явно: версии ниже 1.3.1 содержат известные уязвимости
+  "starlette>=1.3.1",
+  "uvicorn[standard]>=0.32,<0.36",
   "sqlalchemy[asyncio]>=2.0,<2.1", "asyncpg>=0.30", "alembic>=1.14",
   "pydantic[email]>=2.9", "pydantic-settings>=2.6", "argon2-cffi>=23.1", "pyjwt>=2.9",
 ]
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*", "tests*", "scripts*"]
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.7", "mypy>=1.13", "bandit>=1.7"]
 
