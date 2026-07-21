@@ -118,10 +118,28 @@ jobs:
             || (echo "openapi/ устарел: выполните make openapi и закоммитьте результат" && exit 1)
       - name: Фикстуры гейта совместимости
         run: cd backend && python -m pytest tests/test_openapi_compat.py -q
-      - name: Breaking changes контракта (схемы, коды, enum, required)
+      - name: Breaking changes контракта (fail-closed)
+        env:
+          # Отсутствие базового контракта допускается только при первичной
+          # загрузке репозитория и требует явного признания через переменную.
+          ALLOW_MISSING_OPENAPI_BASELINE: ${{ vars.ALLOW_MISSING_OPENAPI_BASELINE }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
         run: |
-          git fetch origin ${{ github.base_ref || 'main' }} --depth=1 || exit 0
-          git show origin/${{ github.base_ref || 'main' }}:openapi/openapi.json > /tmp/base.json 2>/dev/null || exit 0
+          set -euo pipefail
+          if ! git fetch origin "$BASE_REF" --depth=1; then
+            echo "Не удалось получить ветку $BASE_REF — проверка контракта невозможна"
+            exit 1
+          fi
+          if ! git show "origin/$BASE_REF:openapi/openapi.json" > /tmp/base.json 2>/dev/null; then
+            if [ "${ALLOW_MISSING_OPENAPI_BASELINE:-false}" = "true" ]; then
+              echo "::warning::Базовый контракт отсутствует, режим первичной загрузки разрешён явно"
+              exit 0
+            fi
+            echo "В ветке $BASE_REF нет openapi/openapi.json." >&2
+            echo "Это либо ошибка, либо первичная загрузка: включите переменную" >&2
+            echo "ALLOW_MISSING_OPENAPI_BASELINE=true осознанно и на один прогон." >&2
+            exit 1
+          fi
           python infrastructure/scripts/openapi_diff.py /tmp/base.json openapi/openapi.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -199,7 +217,6 @@ jobs:
           cd frontend && npm ci && npx playwright install --with-deps chromium
           npm run build && (npx vite preview --port 5173 &) && sleep 4
           npx playwright test
-        continue-on-error: false
 
   security:
     name: Безопасность · зависимости и SAST
@@ -271,7 +288,23 @@ jobs:
   release-gate:
     name: Release Gate — все обязательные проверки
     runs-on: ubuntu-latest
+    if: always()
     needs: [backend-quality, database, backend-tests, frontend, e2e, security, docker]
     steps:
-      - name: Подтверждение
-        run: echo "Все обязательные проверки пройдены — релиз разрешён"
+      - name: Проверка результатов обязательных задач
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ["RESULTS"])
+          failed = [name for name, data in results.items() if data.get("result") != "success"]
+          for name, data in sorted(results.items()):
+              print(f"  {name:18} {data.get('result')}")
+          if failed:
+              print("Release Gate НЕ пройден: " + ", ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          print("Release Gate пройден: все обязательные задачи успешны")
+          PY

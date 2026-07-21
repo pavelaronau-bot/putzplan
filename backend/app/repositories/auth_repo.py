@@ -82,13 +82,15 @@ class AuthRepository:
              WHERE id = :s AND revoked_at IS NULL"""), {"s": str(session_id), "r": reason})
 
     async def rotate_session(self, *, old_hash: str, new_hash: str, ip: str | None,
-                             user_agent: str | None, ttl_days: int) -> dict:
+                             user_agent: str | None, ttl_days: int,
+                             grace_seconds: int) -> dict:
         """Атомарная ротация: lookup, проверка, отзыв и создание — одной операцией
         под блокировкой строки. Параллельные запросы получают race_lost или reuse."""
         row = (await self.session.execute(
-            text("SELECT * FROM auth_rotate_session(:old, :new, CAST(:ip AS inet), :ua, :ttl)"),
+            text("SELECT * FROM auth_rotate_session(:old, :new, CAST(:ip AS inet), :ua, :ttl, :grace)"),
             {"old": old_hash, "new": new_hash, "ip": ip,
-             "ua": (user_agent or "")[:300], "ttl": ttl_days})).mappings().first()
+             "ua": (user_agent or "")[:300], "ttl": ttl_days,
+             "grace": grace_seconds})).mappings().first()
         return dict(row) if row else {"result": "not_found"}
 
     async def revoke_family(self, family_id: UUID, reason: str) -> int:

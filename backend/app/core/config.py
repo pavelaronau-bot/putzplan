@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     access_ttl_seconds: int = 900
     refresh_ttl_days: int = 30
 
+    # Штатная гонка при параллельном обновлении токена: повтор в этом окне
+    # не считается кражей. Значение подобрано под сетевые задержки клиента.
+    refresh_grace_seconds: int = 30
     max_failed_attempts: int = 5
     lock_minutes: int = 15
     login_rate_limit: int = 10

@@ -111,7 +111,8 @@ async def refresh(*, raw_token: str, ip: str | None, user_agent: str | None,
     async with system_session() as session:
         outcome = await AuthRepository(session).rotate_session(
             old_hash=token_hash, new_hash=next_hash, ip=ip, user_agent=user_agent,
-            ttl_days=settings.refresh_ttl_days)
+            ttl_days=settings.refresh_ttl_days,
+            grace_seconds=settings.refresh_grace_seconds)
 
     result = outcome.get("result")
 
@@ -127,10 +128,20 @@ async def refresh(*, raw_token: str, ip: str | None, user_agent: str | None,
         metrics.inc("refresh.reuse_detected")
         raise Conflict("Токен уже использован, все сессии отозваны", code="refresh_reuse")
 
-    if result == "race_lost":
-        # Токен забрал параллельный запрос: это не кража, но повторять нельзя
-        metrics.inc("refresh.race_lost")
-        raise Conflict("Токен уже обновлён параллельным запросом", code="refresh_race")
+    if result == "race":
+        # Штатная гонка: тот же токен обновлён параллельным запросом секунду назад.
+        # Семейство НЕ отзываем — иначе победитель гонки теряет доступ.
+        await audit_service.record(
+            company_id=outcome["company_id"], user_id=outcome["user_id"],
+            actor_role=outcome.get("role_key"), action="REFRESH_RACE_DETECTED",
+            entity="session", entity_id=outcome["session_id"],
+            after={"replacement_session": str(outcome.get("replacement_session_id")),
+                   "token_family": str(outcome["family_id"])},
+            reason="параллельное обновление в пределах grace-window: сессии сохранены",
+            ip=ip, user_agent=user_agent, http_status=409, request_id=request_id)
+        metrics.inc("refresh.race")
+        raise Conflict("Токен уже обновлён параллельным запросом, повторите с новым",
+                       code="refresh_race")
 
     if result == "expired":
         raise Unauthorized("Сессия истекла", code="session_expired")

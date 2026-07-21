@@ -104,7 +104,7 @@ ORIGIN='http://localhost:5173'
 s,b,_=call('POST','/api/v1/auth/refresh',{},cookies=ck,csrf=csrf_value,origin=ORIGIN)
 chk('ротация refresh по cookie', s==200 and 'access_token' in b,(s,b))
 s,b,_=call('POST','/api/v1/auth/refresh',{},cookies=ck,csrf=csrf_value,origin=ORIGIN)
-chk('повтор старого refresh 409', s in (409,) and b['code'] in ('refresh_reuse','refresh_race'),(s,b))
+chk('повтор старого refresh 409 (штатная гонка)', s==409 and b['code']=='refresh_race',(s,b))
 s,b,_=call('POST','/api/v1/auth/refresh',{},cookies=ck,csrf='fremd',origin=ORIGIN)
 chk('CSRF: неверный токен 403', s==403 and b['code']=='csrf_token_mismatch',(s,b))
 s,b,_=call('POST','/api/v1/auth/refresh',{},cookies=ck,csrf=csrf_value,origin='https://evil.example.com')
@@ -116,7 +116,10 @@ owner=b['access_token']
 s,b,_=call('GET','/api/v1/audit-logs?limit=30',token=owner)
 actions=[e['action'] for e in b.get('data',[])]
 chk('журнал доступен', s==200 and len(actions)>0,(s,len(actions)))
-for need in ['LOGIN_SUCCESS','LOGIN_FAILED','USER_CREATED','USER_UPDATED','USER_DEACTIVATED','ROLE_CREATED','ROLE_PERMISSIONS_UPDATED','ACCESS_DENIED','REFRESH_REUSE_DETECTED']:
+# Повтор refresh сразу после ротации — штатная гонка, а не кража:
+# ожидаем REFRESH_RACE_DETECTED. Событие кражи проверяется в pytest,
+# где grace-window сдвигается в прошлое.
+for need in ['LOGIN_SUCCESS','LOGIN_FAILED','USER_CREATED','USER_UPDATED','USER_DEACTIVATED','ROLE_CREATED','ROLE_PERMISSIONS_UPDATED','ACCESS_DENIED','REFRESH_RACE_DETECTED']:
     chk(f'журнал: {need}', need in actions, actions[:12])
 seqs=[e['chain_seq'] for e in b['data']]
 chk('chain_seq монотонен', all(seqs[i]>seqs[i+1] for i in range(len(seqs)-1)), seqs[:6])

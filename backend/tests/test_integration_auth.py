@@ -56,6 +56,11 @@ async def test_me_returns_permissions(client: AsyncClient, owner_token: str):
 
 
 async def test_refresh_rotation_and_reuse_detection(client: AsyncClient):
+    """Ротация, штатная гонка и настоящее повторное использование — разные случаи.
+
+    Повтор сразу после ротации считается гонкой клиента и семейство не рвёт.
+    Тот же повтор за пределами grace-window означает кражу токена.
+    """
     login = await client.post("/api/v1/auth/login",
                               json={"email": DISPATCHER_EMAIL, "password": DISPATCHER_PASSWORD})
     first_cookie = login.cookies.get("putzplan_refresh")
@@ -67,13 +72,34 @@ async def test_refresh_rotation_and_reuse_detection(client: AsyncClient):
     second_cookie = rotated.cookies.get("putzplan_refresh")
     assert second_cookie and second_cookie != first_cookie
 
-    reused = await client.post("/api/v1/auth/refresh", json={"refresh_token": first_cookie},
+    # Повтор в пределах окна — штатная гонка
+    race = await client.post("/api/v1/auth/refresh", json={"refresh_token": first_cookie},
+                             headers=browser_headers(client))
+    assert race.status_code == 409 and race.json()["code"] == "refresh_race"
+
+    # Преемник продолжает работать: гонка не отзывает семейство
+    still_valid = await client.post("/api/v1/auth/refresh", json={"refresh_token": second_cookie},
+                                    headers=browser_headers(client))
+    assert still_valid.status_code == 200, "штатная гонка не должна ломать цепочку"
+    third_cookie = still_valid.cookies.get("putzplan_refresh")
+
+    # Сдвигаем момент замены в прошлое: теперь повтор — это кража
+    from sqlalchemy import text
+
+    from app.db.session import system_session
+    from app.security.tokens import hash_refresh_token
+    async with system_session() as session:
+        await session.execute(text("""
+            UPDATE sessions SET rotated_at = now() - interval '10 minutes'
+             WHERE refresh_token_hash = :h"""), {"h": hash_refresh_token(second_cookie)})
+
+    reused = await client.post("/api/v1/auth/refresh", json={"refresh_token": second_cookie},
                                headers=browser_headers(client))
     assert reused.status_code == 409 and reused.json()["code"] == "refresh_reuse"
 
-    after_break = await client.post("/api/v1/auth/refresh", json={"refresh_token": second_cookie},
+    after_break = await client.post("/api/v1/auth/refresh", json={"refresh_token": third_cookie},
                                     headers=browser_headers(client))
-    assert after_break.status_code in (401, 409), "цепочка сессий должна быть отозвана"
+    assert after_break.status_code in (401, 409), "после кражи семейство должно быть отозвано"
 
 
 async def test_logout_revokes_session_immediately(client: AsyncClient):
