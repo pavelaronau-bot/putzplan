@@ -1,5 +1,4 @@
 """Сценарии работы с проектами: CRUD, статусы, контакты, документы, финансы."""
-from datetime import date
 from uuid import UUID
 
 from app.core.errors import Conflict, Forbidden, NotFound, UnprocessableEntity
