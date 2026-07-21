@@ -28,6 +28,7 @@ test('вход, список пользователей, создание пол
   await page.getByRole('button', { name: 'Добавить пользователя' }).click()
   await page.getByLabel('Имя и фамилия').fill('E2E Person')
   await page.getByLabel('E-Mail').fill(`e2e-${unique}@demo.putzplan.de`)
+  await expect(page.getByLabel('Роль', { exact: true }).locator('option[value="dispatcher"]')).toHaveCount(1)
   await page.getByLabel('Роль', { exact: true }).selectOption('dispatcher')
   await page.getByLabel(/Пароль/).fill('E2ePasswort12345')
   await page.getByRole('button', { name: 'Сохранить' }).click()
