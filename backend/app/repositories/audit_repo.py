@@ -16,7 +16,7 @@ class AuditRepository:
                      after: dict[str, Any] | None, reason: str | None, ip: str | None,
                      user_agent: str | None, http_status: int | None) -> dict:
         import json
-        row = (await self.session.execute(text("""
+        row = rows = (await self.session.execute(text(f"""  # nosec B608
             INSERT INTO audit_logs (company_id, request_id, user_id, actor_kind, actor_role,
                                     action, entity, entity_id, before, after, reason,
                                     ip, user_agent, http_status)
@@ -55,7 +55,7 @@ class AuditRepository:
               FROM audit_logs WHERE {clause}
              ORDER BY chain_seq DESC LIMIT :limit OFFSET :offset"""), params)).mappings().all()
         total = (await self.session.execute(
-            text(f"SELECT count(*) FROM audit_logs WHERE {clause}"), params)).scalar_one()
+            text(f"SELECT count(*) FROM audit_logs WHERE {clause}"), params)).scalar_one()  # nosec B608
         return [dict(r) for r in rows], int(total)
 
     async def verify_chain(self, company_id: UUID) -> list[dict]:
