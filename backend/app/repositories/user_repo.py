@@ -35,8 +35,7 @@ class UserRepository:
         sort: str,
         order: str,
     ) -> tuple[list[dict], int]:
-        # Имя колонки берётся только из белого списка, значения передаются
-        # параметрами: конкатенация в SQL здесь безопасна.
+        # Название колонки берётся только из белого списка.
         sort_column = sort if sort in ALLOWED_SORT else "created_at"
         direction = "ASC" if order.lower() == "asc" else "DESC"
 
@@ -64,41 +63,41 @@ class UserRepository:
 
         clause = " AND ".join(where)
 
+        users_sql = (
+            "SELECT "
+            "u.id, "
+            "u.email::text AS email, "
+            "u.phone, "
+            "u.full_name, "
+            "u.position, "
+            "u.status::text AS status, "
+            "r.key AS role, "
+            "u.last_login_at, "
+            "u.created_at "
+            "FROM users u "
+            "JOIN roles r ON r.id = u.role_id "
+            f"WHERE {clause} "  # nosec B608
+            f"ORDER BY u.{sort_column} {direction} NULLS LAST "  # nosec B608
+            "LIMIT :limit OFFSET :offset"
+        )
+
         rows = (
             await self.session.execute(
-                text(  # nosec B608
-                    f"""
-                    SELECT
-                        u.id,
-                        u.email::text AS email,
-                        u.phone,
-                        u.full_name,
-                        u.position,
-                        u.status::text AS status,
-                        r.key AS role,
-                        u.last_login_at,
-                        u.created_at
-                    FROM users u
-                    JOIN roles r ON r.id = u.role_id
-                    WHERE {clause}
-                    ORDER BY u.{sort_column} {direction} NULLS LAST
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
+                text(users_sql),
                 params,
             )
         ).mappings().all()
 
+        count_sql = (
+            "SELECT count(*) AS n "
+            "FROM users u "
+            "JOIN roles r ON r.id = u.role_id "
+            f"WHERE {clause}"  # nosec B608
+        )
+
         total = (
             await self.session.execute(
-                text(  # nosec B608
-                    f"""
-                    SELECT count(*) AS n
-                    FROM users u
-                    JOIN roles r ON r.id = u.role_id
-                    WHERE {clause}
-                    """
-                ),
+                text(count_sql),
                 params,
             )
         ).scalar_one()
