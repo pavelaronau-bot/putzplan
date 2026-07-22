@@ -65,11 +65,15 @@ async function openCreateUserModal(page: Page): Promise<void> {
     rolesResponse.status(),
     'Запрос списка ролей должен завершиться успешно',
   ).toBe(200)
+
+  await expect(page.locator('form.modal')).toBeVisible()
 }
 
 async function selectDispatcherRole(page: Page): Promise<void> {
-  const roleSelect = page.getByLabel('Роль', { exact: true })
+  const modal = page.locator('form.modal')
+  const roleSelect = modal.getByRole('combobox')
 
+  await expect(modal).toBeVisible()
   await expect(roleSelect).toBeVisible()
 
   await expect(
@@ -77,6 +81,8 @@ async function selectDispatcherRole(page: Page): Promise<void> {
   ).toHaveCount(1)
 
   await roleSelect.selectOption('dispatcher')
+
+  await expect(roleSelect).toHaveValue('dispatcher')
 }
 
 async function createDispatcher(
@@ -86,18 +92,45 @@ async function createDispatcher(
 ): Promise<void> {
   await openCreateUserModal(page)
 
-  await page.getByLabel('Имя и фамилия').fill(fullName)
-  await page.getByLabel('E-Mail').fill(email)
+  const modal = page.locator('form.modal')
+
+  await modal.getByLabel('Имя и фамилия').fill(fullName)
+  await modal.getByLabel('E-Mail').fill(email)
 
   await selectDispatcherRole(page)
 
-  await page.getByLabel(/Пароль/).fill(TEST_PASSWORD)
+  await modal.getByLabel(/Пароль/).fill(TEST_PASSWORD)
 
-  await page
+  const createResponsePromise = page.waitForResponse(
+    response =>
+      response.url().includes('/api/v1/users') &&
+      response.request().method() === 'POST',
+  )
+
+  await modal
     .getByRole('button', { name: 'Сохранить' })
     .click()
 
-  await expect(page.getByText(fullName)).toBeVisible()
+  const createResponse = await createResponsePromise
+
+  console.log('CREATE USER STATUS:', createResponse.status())
+  console.log('CREATE USER BODY:', await createResponse.text())
+
+  expect(
+    createResponse.status(),
+    `Создание пользователя ${email} должно завершиться успешно`,
+  ).toBeGreaterThanOrEqual(200)
+
+  expect(
+    createResponse.status(),
+    `Создание пользователя ${email} не должно возвращать ошибку`,
+  ).toBeLessThan(300)
+
+  await expect(modal).toHaveCount(0)
+
+  await expect(
+    page.getByRole('row').filter({ hasText: email }),
+  ).toBeVisible()
 }
 
 test('владелец создаёт пользователя и назначает роль', async ({ page }) => {
@@ -143,7 +176,7 @@ test('пользователь без прав не видит раздел по
   const dispatcherName = `E2E Dispatcher ${unique}`
 
   // Создаём отдельного Dispatcher прямо в этом тесте.
-  // Тест больше не зависит от пароля пользователя из seed_dev.py.
+  // Тест не зависит от пароля пользователя из seed_dev.py.
   await createDispatcher(
     page,
     dispatcherEmail,
