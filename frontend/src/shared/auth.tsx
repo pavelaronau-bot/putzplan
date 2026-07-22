@@ -1,6 +1,18 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { ReactNode } from 'react'
-import { api, setAccessToken, setUnauthorizedHandler } from '../api/client'
+import {
+  api,
+  setAccessToken,
+  setUnauthorizedHandler,
+} from '../api/client'
 import type { Me } from '../api/types'
 
 interface AuthState {
@@ -17,9 +29,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const refreshMe = useCallback(async () => {
+  /*
+   * Храним запуск первоначального восстановления сессии.
+   * Login обязан дождаться его окончания, чтобы старый ответ /me
+   * не мог стереть новый access token.
+   */
+  const bootstrapPromiseRef = useRef<Promise<void> | null>(null)
+
+  const refreshMe = useCallback(async (): Promise<void> => {
     try {
-      setMe(await api.me())
+      const currentUser = await api.me()
+      setMe(currentUser)
     } catch {
       setMe(null)
     } finally {
@@ -31,34 +51,82 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUnauthorizedHandler(() => {
       setAccessToken(null)
       setMe(null)
+      setLoading(false)
     })
-    // При загрузке пробуем восстановить сессию по refresh-cookie
-    void refreshMe()
+
+    const bootstrapPromise = refreshMe()
+    bootstrapPromiseRef.current = bootstrapPromise
+
+    void bootstrapPromise
   }, [refreshMe])
 
-  const login = useCallback(async (email: string, password: string) => {
-    const tokens = await api.login(email, password)
-    setAccessToken(tokens.access_token)
-    setMe(await api.me())
-  }, [])
+  const login = useCallback(
+    async (email: string, password: string): Promise<void> => {
+      /*
+       * Сначала обязательно завершаем первоначальную проверку refresh-cookie.
+       * Это устраняет гонку между начальным /me и новым входом.
+       */
+      if (bootstrapPromiseRef.current) {
+        await bootstrapPromiseRef.current
+      }
 
-  const logout = useCallback(async () => {
-    try { await api.logout() } finally {
+      setLoading(true)
+
+      try {
+        const tokens = await api.login(email, password)
+
+        setAccessToken(tokens.access_token)
+
+        const currentUser = await api.me()
+        setMe(currentUser)
+      } catch (error) {
+        setAccessToken(null)
+        setMe(null)
+        throw error
+      } finally {
+        setLoading(false)
+      }
+    },
+    [],
+  )
+
+  const logout = useCallback(async (): Promise<void> => {
+    setLoading(true)
+
+    try {
+      await api.logout()
+    } finally {
       setAccessToken(null)
       setMe(null)
+      setLoading(false)
     }
   }, [])
 
-  const value = useMemo<AuthState>(() => ({
-    me, loading, login, logout,
-    can: (permission: string) => me?.permissions.some((p) => p.key === permission) ?? false,
-  }), [me, loading, login, logout])
+  const value = useMemo<AuthState>(
+    () => ({
+      me,
+      loading,
+      login,
+      logout,
+      can: (permission: string) =>
+        me?.permissions.some(item => item.key === permission) ?? false,
+    }),
+    [me, loading, login, logout],
+  )
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth(): AuthState {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth используется вне AuthProvider')
-  return ctx
+  const context = useContext(AuthContext)
+
+  if (!context) {
+    throw new Error('useAuth используется вне AuthProvider')
+  }
+
+  return context
 }
