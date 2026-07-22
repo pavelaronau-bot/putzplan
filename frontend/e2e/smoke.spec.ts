@@ -159,9 +159,28 @@ test('владелец видит каталог прав', async ({ page }) => 
     .getByRole('link', { name: 'Роли и права' })
     .click()
 
-  await expect(page.getByText('users.read')).toBeVisible()
-})
+  await expect(
+    page.getByRole('heading', { name: 'Роли и права' }),
+  ).toBeVisible()
 
+  const ownerRoleRow = page
+    .getByRole('row')
+    .filter({ hasText: 'super_admin' })
+
+  await expect(ownerRoleRow).toBeVisible()
+
+  await ownerRoleRow
+    .getByRole('button', { name: 'Права' })
+    .click()
+
+  const permissionsModal = page.locator('.modal.wide')
+
+  await expect(permissionsModal).toBeVisible()
+
+  await expect(
+    permissionsModal.getByText('users.read', { exact: true }),
+  ).toBeVisible()
+})
 test('пользователь без прав не видит раздел пользователей', async ({
   page,
 }) => {
