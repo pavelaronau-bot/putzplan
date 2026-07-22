@@ -1,32 +1,61 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 /**
- * Сквозной сценарий Sprint 1:
- * вход → пользователи → создание → назначение роли.
+ * Сквозные сценарии Sprint 1:
+ * вход → пользователи → создание пользователя → назначение роли.
  *
- * Требует поднятых API и фронтенда;
- * в CI запускается на шаге e2e.
+ * Требуют запущенных API и фронтенда.
+ * В CI выполняются в задаче E2E · Playwright Chromium.
  */
 
-// Учётные данные берутся из окружения.
-// Значения по умолчанию используются только для локального прогона
-// против демонстрационной базы.
+// Учётные данные берутся из переменных окружения.
+// Значения по умолчанию предназначены для демонстрационной базы.
 const OWNER = {
   email: process.env.E2E_OWNER_EMAIL ?? 'owner@demo.putzplan.de',
   password: process.env.E2E_OWNER_PASSWORD ?? 'Owner12345678',
 }
 
 const DISPATCHER = {
-  email: process.env.E2E_DISPATCHER_EMAIL ?? 'dispatcher@demo.putzplan.de',
-  password: process.env.E2E_DISPATCHER_PASSWORD ?? 'Dispatcher12345678',
+  email:
+    process.env.E2E_DISPATCHER_EMAIL ?? 'dispatcher@demo.putzplan.de',
+  password:
+    process.env.E2E_DISPATCHER_PASSWORD ?? 'Dispatcher12345678',
+}
+
+/**
+ * Выполняет вход и выводит в лог настоящий ответ API.
+ * Это временная диагностика и не изменяет данные приложения.
+ */
+async function login(
+  page: Page,
+  credentials: {
+    email: string
+    password: string
+  },
+  label: string,
+): Promise<void> {
+  await page.goto('/')
+
+  await page.getByLabel('E-Mail').fill(credentials.email)
+  await page.getByLabel('Пароль').fill(credentials.password)
+
+  const loginResponsePromise = page.waitForResponse(
+    response =>
+      response.url().includes('/api/v1/auth/login') &&
+      response.request().method() === 'POST',
+  )
+
+  await page.getByRole('button', { name: 'Войти' }).click()
+
+  const loginResponse = await loginResponsePromise
+
+  console.log(`${label} LOGIN STATUS:`, loginResponse.status())
+  console.log(`${label} LOGIN BODY:`, await loginResponse.text())
+  console.log(`${label} CURRENT URL:`, page.url())
 }
 
 test('владелец создаёт пользователя и назначает роль', async ({ page }) => {
-  await page.goto('/')
-
-  await page.getByLabel('E-Mail').fill(OWNER.email)
-  await page.getByLabel('Пароль').fill(OWNER.password)
-  await page.getByRole('button', { name: 'Войти' }).click()
+  await login(page, OWNER, 'OWNER')
 
   await expect(
     page.getByRole('heading', { name: 'Мой профиль' }),
@@ -40,22 +69,28 @@ test('владелец создаёт пользователя и назнача
 
   const unique = Date.now().toString().slice(-8)
 
+  // Настоящий запрос ролей выполняется самим интерфейсом
+  // после открытия окна добавления пользователя.
+  const rolesResponsePromise = page.waitForResponse(
+    response =>
+      response.url().includes('/api/v1/roles') &&
+      response.request().method() === 'GET',
+  )
+
   await page
     .getByRole('button', { name: 'Добавить пользователя' })
     .click()
 
-  await page.getByLabel('Имя и фамилия').fill('E2E Person')
-  await page
-    .getByLabel('E-Mail')
-    .fill(`e2e-${unique}@demo.putzplan.de`)
-
-  // Временная диагностика endpoint ролей.
-  const rolesResponse = await page.request.get(
-    'http://127.0.0.1:8000/api/v1/roles',
-  )
+  const rolesResponse = await rolesResponsePromise
 
   console.log('ROLES STATUS:', rolesResponse.status())
   console.log('ROLES BODY:', await rolesResponse.text())
+
+  await page.getByLabel('Имя и фамилия').fill('E2E Person')
+
+  await page
+    .getByLabel('E-Mail')
+    .fill(`e2e-${unique}@demo.putzplan.de`)
 
   const roleSelect = page.getByLabel('Роль', { exact: true })
 
@@ -77,11 +112,11 @@ test('владелец создаёт пользователя и назнача
 })
 
 test('владелец видит каталог прав', async ({ page }) => {
-  await page.goto('/')
+  await login(page, OWNER, 'OWNER')
 
-  await page.getByLabel('E-Mail').fill(OWNER.email)
-  await page.getByLabel('Пароль').fill(OWNER.password)
-  await page.getByRole('button', { name: 'Войти' }).click()
+  await expect(
+    page.getByRole('heading', { name: 'Мой профиль' }),
+  ).toBeVisible()
 
   await page.getByRole('link', { name: 'Роли' }).click()
 
@@ -91,11 +126,7 @@ test('владелец видит каталог прав', async ({ page }) => 
 test('пользователь без прав не видит раздел пользователей', async ({
   page,
 }) => {
-  await page.goto('/')
-
-  await page.getByLabel('E-Mail').fill(DISPATCHER.email)
-  await page.getByLabel('Пароль').fill(DISPATCHER.password)
-  await page.getByRole('button', { name: 'Войти' }).click()
+  await login(page, DISPATCHER, 'DISPATCHER')
 
   await expect(
     page.getByRole('heading', { name: 'Мой профиль' }),
